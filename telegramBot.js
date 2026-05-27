@@ -22,7 +22,7 @@ const Reading  = require("./models/Reading");
 const TOKEN     = process.env.TELEGRAM_BOT_TOKEN;
 const CHAT_ID   = process.env.TELEGRAM_CHAT_ID;
 const DASHBOARD = process.env.DASHBOARD_URL || "https://your-dashboard.netlify.app";
-const AI_KEY    = process.env.ANTHROPIC_API_KEY;
+const AI_KEY = process.env.GEMINI_API_KEY;
 
 let lastUpdateId = 0;
 
@@ -155,68 +155,91 @@ function localTime() {
 // ============================================================
 //  CLAUDE AI TIPS
 // ============================================================
-
 async function getAITips(latest, yesterday, week) {
-  if (!AI_KEY) return "AI tips unavailable — ANTHROPIC_API_KEY not set.";
 
-  const context = `
-Smart Home Energy Data:
-- Current: Light=${latest.lightOn}, TV=${latest.tvOn}, Fridge=${latest.fridgeOn}
-- Energy today: Light=${latest.energyLightKwh}kWh, TV=${latest.energyTvKwh}kWh, Fridge=${latest.energyFridgeKwh}kWh
-- Total energy: ${latest.totalEnergyKwh}kWh, Cost: ${latest.costDen} den
-- Current tariff: ${latest.tariff} den/kWh (${tariffLabel(latest.tariff)})
-- Runtimes: Light=${latest.runtimeLightMin}min, TV=${latest.runtimeTvMin}min, Fridge=${latest.runtimeFridgeMin}min
-- Virtual time: ${pad(latest.virtualHour)}:${pad(latest.virtualMin)}
-${yesterday ? `- Yesterday TV runtime: ${yesterday.runtimeTvMin}min` : ""}
-${week ? `- 7-day totals: ${week.totalKwh}kWh, ${week.totalCost}den, TV=${week.tvHours}h, Light=${week.lightHours}h` : ""}
+  if (!AI_KEY) {
+    return "AI tips unavailable — GEMINI_API_KEY not set.";
+  }
+
+  const prompt = `
+You are an AI energy advisor for a smart home system.
+
+Give exactly 3 short practical energy-saving tips.
+
+Use emojis.
+Each tip must be under 20 words.
+
+Current data:
+- Total energy: ${latest.totalEnergyKwh} kWh
+- Total cost: ${latest.costDen} den
+- Tariff: ${latest.tariff} den/kWh
+- TV runtime: ${latest.runtimeTvMin} min
+- Light runtime: ${latest.runtimeLightMin} min
+- Fridge runtime: ${latest.runtimeFridgeMin} min
+
+7-day data:
+${week ? `${week.totalKwh} kWh and ${week.totalCost} den` : "Unavailable"}
 `;
 
   const body = JSON.stringify({
-    model:      "claude-sonnet-4-20250514",
-    max_tokens: 300,
-    messages: [{
-      role:    "user",
-      content: `You are an AI energy advisor for a smart home system in Macedonia. 
-Based on this data, give exactly 3 short, specific, actionable tips.
-Each tip on its own line starting with a relevant emoji.
-Be specific with numbers from the data. Keep each tip under 20 words.
-Data: ${context}`,
-    }],
+    contents: [
+      {
+        parts: [
+          { text: prompt }
+        ]
+      }
+    ]
   });
 
   return new Promise((resolve) => {
+
     const options = {
-      hostname: "api.anthropic.com",
-      path:     "/v1/messages",
-      method:   "POST",
-      headers:  {
-        "Content-Type":      "application/json",
-        "x-api-key":         AI_KEY,
-        "anthropic-version": "2023-06-01",
-        "Content-Length":    Buffer.byteLength(body),
+      hostname: "generativelanguage.googleapis.com",
+      path: `/v1beta/models/gemini-2.0-flash:generateContent?key=${AI_KEY}`,
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(body),
       },
     };
 
     const req = https.request(options, (res) => {
+
       let data = "";
-      res.on("data",  (c) => data += c);
-      res.on("end",   () => {
+
+      res.on("data", chunk => data += chunk);
+
+      res.on("end", () => {
+
         try {
+
           const parsed = JSON.parse(data);
-          const text   = parsed.content?.[0]?.text ?? "Could not generate tips.";
+
+          const text =
+            parsed.candidates?.[0]?.content?.parts?.[0]?.text ||
+            "Could not generate AI tips.";
+
           resolve(text);
+
         } catch {
-          resolve("Could not parse AI response.");
+
+          resolve("Could not parse Gemini response.");
+
         }
+
       });
+
     });
 
-    req.on("error", () => resolve("AI service unavailable."));
+    req.on("error", () => {
+      resolve("Gemini AI unavailable.");
+    });
+
     req.write(body);
     req.end();
+
   });
 }
-
 // ============================================================
 //  KEYBOARDS
 // ============================================================
