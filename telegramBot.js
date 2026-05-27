@@ -19,7 +19,7 @@
 const https    = require("https");
 const Reading  = require("./models/Reading");
 
-const TOKEN     = process.env.TELEGRAM_TOKEN;
+const TOKEN     = process.env.TELEGRAM_BOT_TOKEN;
 const CHAT_ID   = process.env.TELEGRAM_CHAT_ID;
 const DASHBOARD = process.env.DASHBOARD_URL || "https://your-dashboard.netlify.app";
 const AI_KEY    = process.env.ANTHROPIC_API_KEY;
