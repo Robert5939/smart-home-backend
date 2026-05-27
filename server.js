@@ -14,22 +14,23 @@ mongoose
   .connect(process.env.MONGODB_URI)
   .then(() => {
     console.log("MongoDB Connected");
-    tg.alertSystemStartup();  // Notify on every server start
+    tg.alertSystemStartup();
   })
   .catch((err) => console.error("MongoDB Error:", err));
 
-// ── State tracking (in-memory, resets on server restart) ──
-// Used to detect *changes* between readings so we don't spam alerts
+// ── In-memory state tracking ──────────────────────────────
 let prevState = {
-  fridgeOn:       true,
-  tvOn:           false,
-  lightOn:        false,
-  tariff:         null,
-  motionDetected: false,
+  fridgeOn:  true,
+  tvOn:      false,
+  lightOn:   false,
+  tariff:    null,
 };
 
-// Daily summary: track last sent date so it fires once per day
+// Cooldowns (real timestamps) to prevent alert spam
+let lastTariffAlert    = 0;   // prevent tariff spam in fast mode
 let lastDailySummaryDate = null;
+
+const TARIFF_COOLDOWN_MS = 60 * 60 * 1000; // max 1 tariff alert per real hour
 
 // ── Health check ──────────────────────────────────────────
 app.get("/", (req, res) => {
@@ -40,36 +41,50 @@ app.get("/", (req, res) => {
 app.post("/api/readings", async (req, res) => {
   try {
     const reading = await Reading.create(req.body);
+    const d   = req.body;
+    const now = Date.now();
 
-    // ── Telegram alert logic ──────────────────────────────
-    const d = req.body;
-
-    // Fridge failure
-    if (prevState.fridgeOn && !d.fridgeOn) {
+    // ── Fridge alerts ─────────────────────────────────────
+    // fridgeOn goes false → fridge failed
+    if (prevState.fridgeOn === true && d.fridgeOn === false) {
       tg.alertFridgeFailure();
     }
-
-    // Fridge recovered
-    if (!prevState.fridgeOn && d.fridgeOn) {
+    // fridgeOn goes true → fridge recovered
+    if (prevState.fridgeOn === false && d.fridgeOn === true) {
       tg.alertFridgeRecovered();
     }
 
-    // TV auto-off (was on, now off, no motion)
-    if (prevState.tvOn && !d.tvOn && !d.motionDetected) {
-      tg.alertTVAutoOff();
+    // ── TV alerts ─────────────────────────────────────────
+    // TV turned off
+    if (prevState.tvOn === true && d.tvOn === false) {
+      // ESP32 sends autoOff:true when motion timeout triggered it
+      if (d.autoOff) {
+        tg.alertTVAutoOff();
+      } else {
+        tg.alertTVManualOff();
+      }
     }
 
-    // Light auto-off (was on, now off, no motion)
-    if (prevState.lightOn && !d.lightOn && !d.motionDetected) {
-      tg.alertLightAutoOff();
+    // ── Light alerts ──────────────────────────────────────
+    if (prevState.lightOn === true && d.lightOn === false) {
+      if (d.autoOff) {
+        tg.alertLightAutoOff();
+      } else {
+        tg.alertLightManualOff();
+      }
     }
 
-    // Tariff change (only after first reading establishes baseline)
-    if (prevState.tariff !== null && prevState.tariff !== d.tariff) {
+    // ── Tariff change — cooldown prevents fast mode spam ──
+    if (
+      prevState.tariff !== null &&
+      prevState.tariff !== d.tariff &&
+      (now - lastTariffAlert) > TARIFF_COOLDOWN_MS
+    ) {
+      lastTariffAlert = now;
       tg.alertTariffChange(d.tariff);
     }
 
-    // Daily summary — fires once per day at virtualHour 8
+    // ── Daily summary at virtual 08:00 ────────────────────
     if (d.virtualHour === 8) {
       const today = new Date().toDateString();
       if (lastDailySummaryDate !== today) {
@@ -78,13 +93,12 @@ app.post("/api/readings", async (req, res) => {
       }
     }
 
-    // Update previous state for next comparison
+    // Update previous state
     prevState = {
-      fridgeOn:       d.fridgeOn,
-      tvOn:           d.tvOn,
-      lightOn:        d.lightOn,
-      tariff:         d.tariff,
-      motionDetected: d.motionDetected,
+      fridgeOn: d.fridgeOn,
+      tvOn:     d.tvOn,
+      lightOn:  d.lightOn,
+      tariff:   d.tariff,
     };
 
     res.status(201).json({ success: true, data: reading });
@@ -132,9 +146,9 @@ app.get("/api/readings/daily", async (req, res) => {
               ]
             }
           },
-          avgTariff:  { $avg: "$tariff" },
-          readings:   { $sum: 1 },
-          dateRef:    { $first: "$timestamp" },
+          avgTariff: { $avg: "$tariff" },
+          readings:  { $sum: 1 },
+          dateRef:   { $first: "$timestamp" },
         },
       },
       { $sort: { "_id.year": 1, "_id.month": 1, "_id.day": 1 } },
@@ -147,7 +161,6 @@ app.get("/api/readings/daily", async (req, res) => {
       const dailyCost  = Math.max(0, d.lastCost   - prevCost);
       const date       = new Date(d.dateRef);
       const label      = date.toLocaleDateString("en-GB", { day: "2-digit", month: "short" });
-
       return {
         label,
         dailyKwh:     Number(dailyKwh.toFixed(3)),
@@ -203,4 +216,8 @@ app.get("/api/readings/today", async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+  const { startPolling } = require("./telegramBot");
+  startPolling();
+});
