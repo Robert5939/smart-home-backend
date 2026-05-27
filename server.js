@@ -29,8 +29,10 @@ let prevState = {
 // Cooldowns (real timestamps) to prevent alert spam
 let lastTariffAlert    = 0;   // prevent tariff spam in fast mode
 let lastDailySummaryDate = null;
+let lastFridgeFailureAlert = 0;
 
 const TARIFF_COOLDOWN_MS = 60 * 60 * 1000; // max 1 tariff alert per real hour
+const FRIDGE_FAILURE_COOLDOWN_MS = 30 * 1000; // max 1 fridge failure alert per 30 seconds
 
 // ── Health check ──────────────────────────────────────────
 app.get("/", (req, res) => {
@@ -45,14 +47,23 @@ app.post("/api/readings", async (req, res) => {
     const now = Date.now();
 
     // ── Fridge alerts ─────────────────────────────────────
-    // fridgeOn goes false → fridge failed
-    if (prevState.fridgeOn === true && d.fridgeOn === false) {
-      tg.alertFridgeFailure();
-    }
-    // fridgeOn goes true → fridge recovered
-    if (prevState.fridgeOn === false && d.fridgeOn === true) {
-      tg.alertFridgeRecovered();
-    }
+
+// Failure detected
+  if (
+    d.fridgeOn === false &&
+    (now - lastFridgeFailureAlert) > FRIDGE_FAILURE_COOLDOWN_MS
+  ) {
+
+    lastFridgeFailureAlert = now;
+
+    tg.alertFridgeFailure();
+  }
+
+  // Recovery detected
+  if (prevState.fridgeOn === false && d.fridgeOn === true) {
+    tg.alertFridgeRecovered();
+  }
+   
 
     // ── TV alerts ─────────────────────────────────────────
     // TV turned off

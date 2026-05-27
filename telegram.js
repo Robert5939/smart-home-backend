@@ -124,8 +124,21 @@ function alertDailySummary(data) {
 ⏰ <i>${timestamp()}</i>`
   );
 }
+let startupSentToday = false;
 
 function alertSystemStartup() {
+
+  const now = new Date();
+
+
+  if (now.getHours() === 0) {
+    startupSentToday = false;
+  }
+
+  if (startupSentToday) return;
+
+  startupSentToday = true;
+
   sendTelegram(
 `🏠 <b>Smart Home EMS Online</b>
 
