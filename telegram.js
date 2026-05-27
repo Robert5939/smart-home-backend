@@ -150,6 +150,7 @@ PIR sensor triggered.
 
 function timestamp() {
   return new Date().toLocaleString("en-GB", {
+    timeZone: "Europe/Skopje",
     day:    "2-digit",
     month:  "short",
     year:   "numeric",
