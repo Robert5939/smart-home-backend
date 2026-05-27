@@ -141,6 +141,17 @@ function pad(n) {
   return String(n ?? 0).padStart(2, "0");
 }
 
+function localTime() {
+  return new Date().toLocaleString("en-GB", {
+    timeZone: "Europe/Skopje",
+    day:    "2-digit",
+    month:  "short",
+    hour:   "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
+
 // ============================================================
 //  CLAUDE AI TIPS
 // ============================================================
@@ -249,7 +260,7 @@ async function buildSummary() {
 ⚡ Total energy:  <b>${d.totalEnergyKwh.toFixed(3)} kWh</b>
 💰 Total cost:    <b>${d.costDen.toFixed(2)} den</b>
 📡 Tariff:        <b>${tariffLabel(d.tariff)}</b>
-⏰ Virtual time:  <b>${pad(d.virtualHour)}:${pad(d.virtualMin)}</b>
+⏰ Current time:  <b>${localTime()}</b>
 
 🕐 <b>Device runtimes:</b>
   💡 Light:   ${d.runtimeLightMin} min
@@ -273,7 +284,7 @@ async function buildDevices() {
 📺 TV:      ${icon(d.tvOn)}
 ❄️ Fridge:  ${icon(d.fridgeOn, !d.fridgeOn)}
 
-🔄 Last updated: just now
+🔄 Last updated: ${localTime()}
 📍 Motion: ${d.motionDetected ? "🟢 Detected" : "⚪ None"}`;
 
   const kb = [
