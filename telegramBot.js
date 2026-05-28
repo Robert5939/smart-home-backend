@@ -161,7 +161,7 @@ ${yesterday ? `- Yesterday TV runtime: ${yesterday.runtimeTvMin} min` : ""}
 ${week ? `- 7-day totals: ${week.totalKwh} kWh, ${week.totalCost} den, TV=${week.tvHours}h, Light=${week.lightHours}h` : ""}`;
 
   const body = JSON.stringify({
-    model: "llama3-8b-8192",
+    model: "llama-3.1-8b-instant",
     messages: [{ role: "user", content: prompt }],
     max_tokens: 300,
   });
