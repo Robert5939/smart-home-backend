@@ -10,7 +10,7 @@ const Reading = require("./models/Reading");
 const TOKEN     = process.env.TELEGRAM_BOT_TOKEN;
 const CHAT_ID   = process.env.TELEGRAM_CHAT_ID;
 const DASHBOARD = process.env.DASHBOARD_URL || "https://your-dashboard.netlify.app";
-const AI_KEY    = process.env.GEMINI_API_KEY;
+const AI_KEY    = process.env.GROQ_API_KEY;
 
 let lastUpdateId = 0;
 
@@ -142,11 +142,10 @@ function localTime() {
 
 async function getAITips(latest, yesterday, week) {
   if (!AI_KEY) {
-    return "⚠️ AI tips unavailable — GEMINI_API_KEY not set in environment.";
+    return "⚠️ AI tips unavailable — GROQ_API_KEY not set.";
   }
 
-  const prompt = `
-You are an AI energy advisor for a smart home system in Macedonia.
+  const prompt = `You are an AI energy advisor for a smart home system in Macedonia.
 Give exactly 3 short practical energy-saving tips based on the data below.
 Use emojis. Each tip must be under 20 words. Be specific with the numbers.
 
@@ -159,20 +158,22 @@ Current data:
 - Fridge runtime: ${latest.runtimeFridgeMin} min
 - Time: ${pad(latest.virtualHour)}:${pad(latest.virtualMin)}
 ${yesterday ? `- Yesterday TV runtime: ${yesterday.runtimeTvMin} min` : ""}
-${week ? `- 7-day totals: ${week.totalKwh} kWh, ${week.totalCost} den, TV=${week.tvHours}h, Light=${week.lightHours}h` : ""}
-`;
+${week ? `- 7-day totals: ${week.totalKwh} kWh, ${week.totalCost} den, TV=${week.tvHours}h, Light=${week.lightHours}h` : ""}`;
 
   const body = JSON.stringify({
-    contents: [{ parts: [{ text: prompt }] }]
+    model: "llama3-8b-8192",
+    messages: [{ role: "user", content: prompt }],
+    max_tokens: 300,
   });
 
   return new Promise((resolve) => {
     const options = {
-      hostname: "generativelanguage.googleapis.com",
-      path:     `/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${AI_KEY}`,
+      hostname: "api.groq.com",
+      path:     "/openai/v1/chat/completions",
       method:   "POST",
       headers:  {
         "Content-Type":   "application/json",
+        "Authorization":  `Bearer ${AI_KEY}`,
         "Content-Length": Buffer.byteLength(body),
       },
     };
@@ -183,38 +184,29 @@ ${week ? `- 7-day totals: ${week.totalKwh} kWh, ${week.totalCost} den, TV=${week
       res.on("end", () => {
         try {
           const parsed = JSON.parse(data);
-          console.log("[Gemini] Status:", res.statusCode);
-          console.log("[Gemini] Response:", JSON.stringify(parsed).substring(0, 300));
+          console.log("[Groq] Status:", res.statusCode);
 
           if (res.statusCode === 429) {
-            resolve("⏳ AI tips temporarily unavailable — rate limit reached. Please try again in 1 minute.");
+            resolve("⏳ AI tips temporarily unavailable — rate limit. Try again in 1 minute.");
             return;
           }
-
-          if (res.statusCode === 404) {
-            resolve("⚠️ AI model not found. Check Gemini API key and model name.");
-            return;
-          }
-
           if (res.statusCode !== 200) {
-            resolve(`⚠️ AI service error (${res.statusCode}). Please try again later.`);
+            console.log("[Groq] Error:", JSON.stringify(parsed).substring(0, 200));
+            resolve(`⚠️ AI service error (${res.statusCode}). Try again later.`);
             return;
           }
 
-          const text =
-            parsed.candidates?.[0]?.content?.parts?.[0]?.text ||
-            "Could not generate AI tips.";
+          const text = parsed.choices?.[0]?.message?.content || "Could not generate tips.";
           resolve(text);
         } catch {
-          console.log("[Gemini] Raw response:", data.substring(0, 300));
-          resolve("Could not parse Gemini response.");
+          resolve("Could not parse AI response.");
         }
       });
     });
 
     req.on("error", (e) => {
-      console.error("[Gemini] Request error:", e.message);
-      resolve("Gemini AI unavailable.");
+      console.error("[Groq] Error:", e.message);
+      resolve("AI service unavailable.");
     });
 
     req.write(body);
@@ -367,7 +359,7 @@ async function buildAITips() {
 
   const text =
 `🤖 <b>AI Energy Tips</b>
-<i>Powered by Gemini AI · Based on your live data</i>
+<i>Powered by Groq AI · Based on your live data</i>
 
 ${tips}`;
 
