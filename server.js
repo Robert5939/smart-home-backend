@@ -196,6 +196,31 @@ app.get("/api/readings/today", async (req, res) => {
       { $sort: { _id: 1 } },
     ]);
 
+    // ── GET latest reading only ──────────────────────────
+app.get("/api/readings/latest", async (req, res) => {
+  try {
+    const latest = await Reading.findOne().sort({ timestamp: -1 });
+
+    if (!latest) {
+      return res.json({
+        success: true,
+        data: null
+      });
+    }
+
+    res.json({
+      success: true,
+      data: latest
+    });
+
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+});
+
     const result = hourly.map((h) => ({
       hour:     `${String(h._id).padStart(2, "0")}:00`,
       kwh:      Number(Math.max(0, h.lastEnergy - h.firstEnergy).toFixed(4)),
