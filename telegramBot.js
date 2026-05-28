@@ -410,9 +410,14 @@ async function handleUpdate(update) {
   // Text message — send a fresh menu, never edit
   if (update.message) {
     const chatId = update.message.chat.id;
+    // Delete the user's command message to keep chat clean
+    await telegramRequest("deleteMessage", {
+      chat_id:    chatId,
+      message_id: update.message.message_id,
+    });
     const [msg, kb] = buildMainMenu();
     await sendMessage(chatId, msg, kb);
-    return;  // ← important: stop here, don't fall through
+    return;
   }
 
   // Button tap — edit the existing message in place
@@ -456,12 +461,18 @@ async function handleUpdate(update) {
 // ============================================================
 //  POLLING LOOP
 // ============================================================
+let pollingActive = false;
 
 async function startPolling() {
   if (!TOKEN) {
     console.log("[Bot] TELEGRAM_BOT_TOKEN not set — bot disabled");
     return;
   }
+  if (pollingActive) {
+    console.log("[Bot] Already polling — skipping duplicate start");
+    return;
+  }
+  pollingActive = true;
   console.log("[Bot] Telegram bot polling started");
 
   const poll = async () => {
