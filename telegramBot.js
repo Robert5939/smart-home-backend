@@ -1,28 +1,16 @@
 /**
  * ============================================================
  *  Smart Home EMS — Interactive Telegram Bot
- *
- *  Features:
- *   - Responds to commands and inline button taps
- *   - Fetches live data from MongoDB for every response
- *   - Uses Claude API for AI-generated tips
- *   - Polls Telegram for updates every 3 seconds
- *
- *  Required .env:
- *    TELEGRAM_TOKEN=...
- *    TELEGRAM_CHAT_ID=...
- *    ANTHROPIC_API_KEY=...
- *    DASHBOARD_URL=...
  * ============================================================
  */
 
-const https    = require("https");
-const Reading  = require("./models/Reading");
+const https   = require("https");
+const Reading = require("./models/Reading");
 
 const TOKEN     = process.env.TELEGRAM_BOT_TOKEN;
 const CHAT_ID   = process.env.TELEGRAM_CHAT_ID;
 const DASHBOARD = process.env.DASHBOARD_URL || "https://your-dashboard.netlify.app";
-const AI_KEY = process.env.GEMINI_API_KEY;
+const AI_KEY    = process.env.GEMINI_API_KEY;
 
 let lastUpdateId = 0;
 
@@ -45,20 +33,10 @@ function telegramRequest(method, body) {
     const req = https.request(options, (res) => {
       let data = "";
       res.on("data", (chunk) => data += chunk);
-      res.on("end", () => {
-        try {
-            const parsed = JSON.parse(data);
-            console.log("[Gemini] Response:", JSON.stringify(parsed).substring(0, 200));
-            const text =
-            parsed.candidates?.[0]?.content?.parts?.[0]?.text ||
-            "Could not generate AI tips.";
-            resolve(text);
-        } catch {
-            console.log("[Gemini] Raw response:", data.substring(0, 200));
-            resolve("Could not parse Gemini response.");
-        }
-    });
-
+      res.on("end",  () => {
+        try { resolve(JSON.parse(data)); }
+        catch { resolve({}); }
+      });
     });
     req.on("error", reject);
     req.write(json);
@@ -66,7 +44,6 @@ function telegramRequest(method, body) {
   });
 }
 
-// Send a message with optional inline keyboard
 async function sendMessage(chatId, text, keyboard = null) {
   const body = {
     chat_id:    chatId,
@@ -77,7 +54,6 @@ async function sendMessage(chatId, text, keyboard = null) {
   return telegramRequest("sendMessage", body);
 }
 
-// Edit an existing message (for button responses)
 async function editMessage(chatId, messageId, text, keyboard = null) {
   const body = {
     chat_id:    chatId,
@@ -90,7 +66,6 @@ async function editMessage(chatId, messageId, text, keyboard = null) {
   return telegramRequest("editMessageText", body);
 }
 
-// Answer a callback query (removes loading spinner on button tap)
 async function answerCallback(callbackQueryId, text = "") {
   return telegramRequest("answerCallbackQuery", {
     callback_query_id: callbackQueryId,
@@ -98,7 +73,6 @@ async function answerCallback(callbackQueryId, text = "") {
   });
 }
 
-// Poll for new messages/button taps
 async function getUpdates() {
   const res = await telegramRequest("getUpdates", {
     offset:  lastUpdateId + 1,
@@ -135,8 +109,8 @@ async function getLast7DaysStats() {
   const first = readings[0];
   const last  = readings[readings.length - 1];
   return {
-    totalKwh:  Number((last.totalEnergyKwh  - first.totalEnergyKwh).toFixed(3)),
-    totalCost: Number((last.costDen          - first.costDen).toFixed(2)),
+    totalKwh:    Number((last.totalEnergyKwh  - first.totalEnergyKwh).toFixed(3)),
+    totalCost:   Number((last.costDen          - first.costDen).toFixed(2)),
     lightHours:  Number(((last.runtimeLightMin  - first.runtimeLightMin)  / 60).toFixed(1)),
     tvHours:     Number(((last.runtimeTvMin     - first.runtimeTvMin)     / 60).toFixed(1)),
     fridgeHours: Number(((last.runtimeFridgeMin - first.runtimeFridgeMin) / 60).toFixed(1)),
@@ -163,120 +137,102 @@ function localTime() {
 }
 
 // ============================================================
-//  CLAUDE AI TIPS
+//  GEMINI AI TIPS
 // ============================================================
-async function getAITips(latest, yesterday, week) {
 
+async function getAITips(latest, yesterday, week) {
   if (!AI_KEY) {
-    return "AI tips unavailable — GEMINI_API_KEY not set.";
+    return "AI tips unavailable — GEMINI_API_KEY not set in environment.";
   }
 
   const prompt = `
-You are an AI energy advisor for a smart home system.
-
-Give exactly 3 short practical energy-saving tips.
-
-Use emojis.
-Each tip must be under 20 words.
+You are an AI energy advisor for a smart home system in Macedonia.
+Give exactly 3 short practical energy-saving tips based on the data below.
+Use emojis. Each tip must be under 20 words. Be specific with the numbers.
 
 Current data:
 - Total energy: ${latest.totalEnergyKwh} kWh
 - Total cost: ${latest.costDen} den
-- Tariff: ${latest.tariff} den/kWh
+- Tariff: ${latest.tariff} den/kWh (${tariffLabel(latest.tariff)})
 - TV runtime: ${latest.runtimeTvMin} min
 - Light runtime: ${latest.runtimeLightMin} min
 - Fridge runtime: ${latest.runtimeFridgeMin} min
-
-7-day data:
-${week ? `${week.totalKwh} kWh and ${week.totalCost} den` : "Unavailable"}
+- Virtual time: ${pad(latest.virtualHour)}:${pad(latest.virtualMin)}
+${yesterday ? `- Yesterday TV runtime: ${yesterday.runtimeTvMin} min` : ""}
+${week ? `- 7-day totals: ${week.totalKwh} kWh, ${week.totalCost} den, TV=${week.tvHours}h, Light=${week.lightHours}h` : ""}
 `;
 
   const body = JSON.stringify({
-    contents: [
-      {
-        parts: [
-          { text: prompt }
-        ]
-      }
-    ]
+    contents: [{ parts: [{ text: prompt }] }]
   });
 
   return new Promise((resolve) => {
-
     const options = {
       hostname: "generativelanguage.googleapis.com",
-      path: `/v1beta/models/gemini-1.5-flash:generateContent?key=${AI_KEY}`,
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
+      path:     `/v1beta/models/gemini-1.5-flash:generateContent?key=${AI_KEY}`,
+      method:   "POST",
+      headers:  {
+        "Content-Type":   "application/json",
         "Content-Length": Buffer.byteLength(body),
       },
     };
 
     const req = https.request(options, (res) => {
-
       let data = "";
-
-      res.on("data", chunk => data += chunk);
-
+      res.on("data", (chunk) => data += chunk);
       res.on("end", () => {
-
         try {
-
           const parsed = JSON.parse(data);
-
+          console.log("[Gemini] Status:", res.statusCode);
+          console.log("[Gemini] Response:", JSON.stringify(parsed).substring(0, 300));
           const text =
             parsed.candidates?.[0]?.content?.parts?.[0]?.text ||
             "Could not generate AI tips.";
-
           resolve(text);
-
         } catch {
-
+          console.log("[Gemini] Raw response:", data.substring(0, 300));
           resolve("Could not parse Gemini response.");
-
         }
-
       });
-
     });
 
-    req.on("error", () => {
+    req.on("error", (e) => {
+      console.error("[Gemini] Request error:", e.message);
       resolve("Gemini AI unavailable.");
     });
 
     req.write(body);
     req.end();
-
   });
 }
+
 // ============================================================
 //  KEYBOARDS
 // ============================================================
 
 const MAIN_MENU = [
   [
-    { text: "📊 Today's Summary",  callback_data: "summary"  },
-    { text: "🏠 Device Status",    callback_data: "devices"  },
+    { text: "📊 Today's Summary", callback_data: "summary" },
+    { text: "🏠 Device Status",   callback_data: "devices" },
   ],
   [
-    { text: "⚡ Energy Stats",     callback_data: "energy"   },
-    { text: "💰 Cost & Tariff",    callback_data: "cost"     },
+    { text: "⚡ Energy Stats",    callback_data: "energy"  },
+    { text: "💰 Cost & Tariff",   callback_data: "cost"    },
   ],
   [
-    { text: "🤖 AI Tips",          callback_data: "ai_tips"  },
-    { text: "📈 7-Day Report",     callback_data: "week"     },
+    { text: "🤖 AI Tips",         callback_data: "ai_tips" },
+    { text: "📈 7-Day Report",    callback_data: "week"    },
   ],
   [
-    { text: "🔗 Open Dashboard",   callback_data: "dashboard" },
+    { text: "🔗 Open Dashboard",  callback_data: "dashboard" },
   ],
 ];
 
 const BACK_BUTTON = [[{ text: "⬅️ Back to Menu", callback_data: "menu" }]];
 
 const REFRESH_BACK = [
-  [{ text: "🔄 Refresh", callback_data: "ai_tips" }],
-  [{ text: "⬅️ Back to Menu", callback_data: "menu" }],
+  [{ text: "🔄 Refresh Tips",    callback_data: "ai_tips" }],
+  [{ text: "⬅️ Back to Menu",   callback_data: "menu"    }],
 ];
 
 // ============================================================
@@ -332,12 +288,12 @@ async function buildEnergy() {
   const d = await getLatest();
   if (!d) return ["No data available yet.", BACK_BUTTON];
 
-  const total = d.totalEnergyKwh;
+  const total     = d.totalEnergyKwh;
   const pctLight  = total > 0 ? ((d.energyLightKwh  / total) * 100).toFixed(0) : 0;
   const pctTV     = total > 0 ? ((d.energyTvKwh     / total) * 100).toFixed(0) : 0;
   const pctFridge = total > 0 ? ((d.energyFridgeKwh / total) * 100).toFixed(0) : 0;
-
-  const bar = (pct) => "█".repeat(Math.round(pct / 10)) + "░".repeat(10 - Math.round(pct / 10));
+  const bar = (pct) =>
+    "█".repeat(Math.round(pct / 10)) + "░".repeat(10 - Math.round(pct / 10));
 
   const text =
 `⚡ <b>Energy Breakdown</b>
@@ -360,7 +316,6 @@ async function buildCost() {
   const d = await getLatest();
   if (!d) return ["No data available yet.", BACK_BUTTON];
 
-  const cheap     = d.tariff <= 5;
   const cheapCost = d.totalEnergyKwh * 5;
   const peakCost  = d.totalEnergyKwh * 10;
   const saving    = (peakCost - cheapCost).toFixed(2);
@@ -396,7 +351,7 @@ async function buildAITips() {
 
   const text =
 `🤖 <b>AI Energy Tips</b>
-<i>Powered by Claude AI · Based on your live data</i>
+<i>Powered by Gemini AI · Based on your live data</i>
 
 ${tips}`;
 
@@ -430,7 +385,9 @@ function buildMainMenu() {
 `🏠 <b>Smart Home EMS</b>
 <i>Your energy management assistant</i>
 
-What would you like to check?`, MAIN_MENU];
+What would you like to check?`,
+    MAIN_MENU
+  ];
 }
 
 // ============================================================
@@ -438,40 +395,32 @@ What would you like to check?`, MAIN_MENU];
 // ============================================================
 
 async function handleUpdate(update) {
-  // Text command (e.g. /start, /menu)
   if (update.message) {
     const chatId = update.message.chat.id;
-    const text   = update.message.text ?? "";
-
-    if (text.startsWith("/start") || text.startsWith("/menu")) {
-      const [msg, kb] = buildMainMenu();
-      await sendMessage(chatId, msg, kb);
-    } else {
-      const [msg, kb] = buildMainMenu();
-      await sendMessage(chatId, msg, kb);
-    }
+    const [msg, kb] = buildMainMenu();
+    await sendMessage(chatId, msg, kb);
   }
 
-  // Inline button tap
   if (update.callback_query) {
-    const query    = update.callback_query;
-    const chatId   = query.message.chat.id;
-    const msgId    = query.message.message_id;
-    const action   = query.data;
+    const query  = update.callback_query;
+    const chatId = query.message.chat.id;
+    const msgId  = query.message.message_id;
+    const action = query.data;
 
     await answerCallback(query.id);
 
     let result;
     switch (action) {
-      case "menu":      result = buildMainMenu();     break;
-      case "summary":   result = buildSummary();      break;
-      case "devices":   result = buildDevices();      break;
-      case "energy":    result = buildEnergy();       break;
-      case "cost":      result = buildCost();         break;
-      case "ai_tips":   result = buildAITips();       break;
-      case "week":      result = buildWeekReport();   break;
+      case "menu":      result = buildMainMenu();   break;
+      case "summary":   result = buildSummary();    break;
+      case "devices":   result = buildDevices();    break;
+      case "energy":    result = buildEnergy();     break;
+      case "cost":      result = buildCost();       break;
+      case "ai_tips":   result = buildAITips();     break;
+      case "week":      result = buildWeekReport(); break;
       case "dashboard":
-        await editMessage(chatId, msgId,
+        await editMessage(
+          chatId, msgId,
           `🔗 <b>Dashboard Link</b>\n\n<a href="${DASHBOARD}">${DASHBOARD}</a>`,
           BACK_BUTTON
         );
@@ -486,12 +435,12 @@ async function handleUpdate(update) {
 }
 
 // ============================================================
-//  POLLING LOOP — runs inside the Express process
+//  POLLING LOOP
 // ============================================================
 
 async function startPolling() {
   if (!TOKEN) {
-    console.log("[Bot] TELEGRAM_TOKEN not set — bot disabled");
+    console.log("[Bot] TELEGRAM_BOT_TOKEN not set — bot disabled");
     return;
   }
   console.log("[Bot] Telegram bot polling started");
