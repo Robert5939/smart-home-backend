@@ -461,38 +461,12 @@ async function handleUpdate(update) {
 // ============================================================
 //  POLLING LOOP
 // ============================================================
-let pollingActive = false;
-
-async function startPolling() {
-  if (!TOKEN) {
-    console.log("[Bot] TELEGRAM_BOT_TOKEN not set — bot disabled");
-    return;
-  }
-  if (pollingActive) {
-    console.log("[Bot] Already polling — skipping duplicate start");
-    return;
-  }
-  pollingActive = true;
-  console.log("[Bot] Telegram bot polling started");
-
-  const poll = async () => {
-    try {
-      const updates = await getUpdates();
-      for (const update of updates) {
-        if (update.update_id > lastUpdateId) {
-          lastUpdateId = update.update_id;
-          handleUpdate(update).catch((e) =>
-            console.error("[Bot] Handler error:", e.message)
-          );
-        }
-      }
-    } catch (e) {
-      console.error("[Bot] Poll error:", e.message);
-    }
-    setTimeout(poll, 3000);
-  };
-
-  poll();
+async function setupWebhook(baseUrl) {
+  const webhookUrl = `${baseUrl}/telegram-webhook`;
+  const res = await telegramRequest("setWebhook", { url: webhookUrl });
+  console.log("[Bot] Webhook set:", JSON.stringify(res));
 }
+
+module.exports = { handleUpdate, setupWebhook };
 
 module.exports = { startPolling };
