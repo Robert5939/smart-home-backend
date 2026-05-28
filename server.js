@@ -225,10 +225,27 @@ app.get("/api/readings/today", async (req, res) => {
     res.status(500).json({ success: false, message: error.message });
   }
 });
-
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`Server running on port ${PORT}`);
-  const { startPolling } = require("./telegramBot");
-  startPolling();
+
+  const { handleUpdate, setupWebhook } = require("./telegramBot");
+
+  // Register webhook with Telegram
+  const baseUrl = process.env.RENDER_EXTERNAL_URL || process.env.DASHBOARD_URL;
+  if (baseUrl) {
+    await setupWebhook(baseUrl);
+  } else {
+    console.log("[Bot] No RENDER_EXTERNAL_URL set — webhook not registered");
+  }
+
+  // Handle incoming Telegram updates via webhook
+  app.post("/telegram-webhook", express.json(), async (req, res) => {
+    res.sendStatus(200); // acknowledge immediately
+    try {
+      await handleUpdate(req.body);
+    } catch (e) {
+      console.error("[Bot] Webhook handler error:", e.message);
+    }
+  });
 });
