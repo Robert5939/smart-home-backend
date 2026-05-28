@@ -1,5 +1,7 @@
 require("dotenv").config();
 
+const http     = require("http");
+const https    = require("https");
 const Reading  = require("./models/Reading");
 const express  = require("express");
 const mongoose = require("mongoose");
@@ -20,19 +22,18 @@ mongoose
 
 // ── In-memory state tracking ──────────────────────────────
 let prevState = {
-  fridgeOn:  true,
-  tvOn:      false,
-  lightOn:   false,
-  tariff:    null,
+  fridgeOn: true,
+  tvOn:     false,
+  lightOn:  false,
+  tariff:   null,
 };
 
-// Cooldowns (real timestamps) to prevent alert spam
-let lastTariffAlert    = 0;   // prevent tariff spam in fast mode
+let lastTariffAlert      = 0;
 let lastDailySummaryDate = null;
-let lastFridgeFailureAlert = 0;
+let lastFridgeFailAlert  = 0;
 
-const TARIFF_COOLDOWN_MS = 60 * 60 * 1000; // max 1 tariff alert per real hour
-const FRIDGE_FAILURE_COOLDOWN_MS = 30 * 1000; // max 1 fridge failure alert per 30 seconds
+const TARIFF_COOLDOWN_MS       = 60 * 60 * 1000;  // 1 hour
+const FRIDGE_FAIL_COOLDOWN_MS  = 30 * 1000;        // 30 seconds
 
 // ── Health check ──────────────────────────────────────────
 app.get("/", (req, res) => {
@@ -46,46 +47,35 @@ app.post("/api/readings", async (req, res) => {
     const d   = req.body;
     const now = Date.now();
 
-    // ── Fridge alerts ─────────────────────────────────────
+    // Fridge failure
+    if (d.fridgeOn === false && (now - lastFridgeFailAlert) > FRIDGE_FAIL_COOLDOWN_MS) {
+      lastFridgeFailAlert = now;
+      tg.alertFridgeFailure();
+    }
 
-// Failure detected
-  if (
-    d.fridgeOn === false &&
-    (now - lastFridgeFailureAlert) > FRIDGE_FAILURE_COOLDOWN_MS
-  ) {
+    // Fridge recovered
+    if (prevState.fridgeOn === false && d.fridgeOn === true) {
+      tg.alertFridgeRecovered();
+    }
 
-    lastFridgeFailureAlert = now;
+    // TV warning — "still watching?" sent by ESP32 after 3 min no motion
+    if (d.tvWarning === true) {
+      tg.alertTVWarning();
+    }
 
-    tg.alertFridgeFailure();
-  }
-
-  // Recovery detected
-  if (prevState.fridgeOn === false && d.fridgeOn === true) {
-    tg.alertFridgeRecovered();
-  }
-   
-
-    // ── TV alerts ─────────────────────────────────────────
     // TV turned off
     if (prevState.tvOn === true && d.tvOn === false) {
-      // ESP32 sends autoOff:true when motion timeout triggered it
-      if (d.autoOff) {
-        tg.alertTVAutoOff();
-      } else {
-        tg.alertTVManualOff();
-      }
+      if (d.autoOff) tg.alertTVAutoOff();
+      else           tg.alertTVManualOff();
     }
 
-    // ── Light alerts ──────────────────────────────────────
+    // Light turned off
     if (prevState.lightOn === true && d.lightOn === false) {
-      if (d.autoOff) {
-        tg.alertLightAutoOff();
-      } else {
-        tg.alertLightManualOff();
-      }
+      if (d.autoOff) tg.alertLightAutoOff();
+      else           tg.alertLightManualOff();
     }
 
-    // ── Tariff change — cooldown prevents fast mode spam ──
+    // Tariff change with cooldown
     if (
       prevState.tariff !== null &&
       prevState.tariff !== d.tariff &&
@@ -95,7 +85,7 @@ app.post("/api/readings", async (req, res) => {
       tg.alertTariffChange(d.tariff);
     }
 
-    // ── Daily summary at virtual 08:00 ────────────────────
+    // Daily summary at real hour 8
     if (d.virtualHour === 8) {
       const today = new Date().toDateString();
       if (lastDailySummaryDate !== today) {
@@ -104,7 +94,6 @@ app.post("/api/readings", async (req, res) => {
       }
     }
 
-    // Update previous state
     prevState = {
       fridgeOn: d.fridgeOn,
       tvOn:     d.tvOn,
@@ -113,7 +102,6 @@ app.post("/api/readings", async (req, res) => {
     };
 
     res.status(201).json({ success: true, data: reading });
-
   } catch (error) {
     console.error(error);
     res.status(500).json({ success: false, message: error.message });
@@ -123,10 +111,7 @@ app.post("/api/readings", async (req, res) => {
 // ── GET latest 1440 raw readings ──────────────────────────
 app.get("/api/readings", async (req, res) => {
   try {
-    const readings = await Reading
-      .find()
-      .sort({ timestamp: -1 })
-      .limit(1440);
+    const readings = await Reading.find().sort({ timestamp: -1 }).limit(1440);
     res.json({ success: true, count: readings.length, data: readings });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -170,8 +155,7 @@ app.get("/api/readings/daily", async (req, res) => {
       const prevCost   = i > 0 ? days[i - 1].lastCost   : d.firstCost;
       const dailyKwh   = Math.max(0, d.lastEnergy - prevEnergy);
       const dailyCost  = Math.max(0, d.lastCost   - prevCost);
-      const date       = new Date(d.dateRef);
-      const label      = date.toLocaleDateString("en-GB", { day: "2-digit", month: "short" });
+      const label      = new Date(d.dateRef).toLocaleDateString("en-GB", { day: "2-digit", month: "short" });
       return {
         label,
         dailyKwh:     Number(dailyKwh.toFixed(3)),
@@ -225,27 +209,39 @@ app.get("/api/readings/today", async (req, res) => {
     res.status(500).json({ success: false, message: error.message });
   }
 });
+
+// ============================================================
+//  START SERVER
+// ============================================================
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, async () => {
   console.log(`Server running on port ${PORT}`);
 
-  const { handleUpdate, setupWebhook } = require("./telegramBot");
-
-  // Register webhook with Telegram
-  const baseUrl = process.env.RENDER_EXTERNAL_URL || process.env.DASHBOARD_URL;
-  if (baseUrl) {
-    await setupWebhook(baseUrl);
-  } else {
-    console.log("[Bot] No RENDER_EXTERNAL_URL set — webhook not registered");
+  // ── Keepalive ping — prevents Render free tier sleep ──
+  const SELF_URL = process.env.RENDER_EXTERNAL_URL;
+  if (SELF_URL) {
+    setInterval(() => {
+      const client = SELF_URL.startsWith("https") ? https : http;
+      client.get(`${SELF_URL}/`, (res) => {
+        console.log("[Keepalive] Pinged — status:", res.statusCode);
+      }).on("error", (e) => {
+        console.error("[Keepalive] Error:", e.message);
+      });
+    }, 14 * 60 * 1000);  // every 14 minutes
+    console.log("[Keepalive] Enabled — pinging every 14 min");
   }
 
-  // Handle incoming Telegram updates via webhook
+  // ── Telegram webhook ──────────────────────────────────
+  const { handleUpdate, setupWebhook } = require("./telegramBot");
+  if (SELF_URL) {
+    await setupWebhook(SELF_URL);
+  } else {
+    console.log("[Bot] RENDER_EXTERNAL_URL not set — webhook not registered");
+  }
+
   app.post("/telegram-webhook", express.json(), async (req, res) => {
-    res.sendStatus(200); // acknowledge immediately
-    try {
-      await handleUpdate(req.body);
-    } catch (e) {
-      console.error("[Bot] Webhook handler error:", e.message);
-    }
+    res.sendStatus(200);
+    try { await handleUpdate(req.body); }
+    catch (e) { console.error("[Bot] Webhook error:", e.message); }
   });
 });
