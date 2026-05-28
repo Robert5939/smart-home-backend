@@ -469,4 +469,3 @@ async function setupWebhook(baseUrl) {
 
 module.exports = { handleUpdate, setupWebhook };
 
-module.exports = { startPolling };
