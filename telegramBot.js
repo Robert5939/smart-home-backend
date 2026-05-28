@@ -9,7 +9,7 @@ const Reading = require("./models/Reading");
 
 const TOKEN     = process.env.TELEGRAM_BOT_TOKEN;
 const CHAT_ID   = process.env.TELEGRAM_CHAT_ID;
-const DASHBOARD = process.env.DASHBOARD_URL || "https://your-dashboard.netlify.app";
+const DASHBOARD = process.env.DASHBOARD_URL || "https://smart-home-energy-system.netlify.app";
 const AI_KEY    = process.env.GROQ_API_KEY;
 
 let lastUpdateId = 0;
@@ -103,17 +103,73 @@ async function getYesterday() {
 async function getLast7DaysStats() {
   const since = new Date();
   since.setDate(since.getDate() - 7);
-  const readings = await Reading.find({ timestamp: { $gte: since } })
-    .sort({ timestamp: 1 });
-  if (!readings.length) return null;
-  const first = readings[0];
-  const last  = readings[readings.length - 1];
+
+  const days = await Reading.aggregate([
+    {
+      $match: {
+        timestamp: { $gte: since }
+      }
+    },
+    {
+      $sort: { timestamp: 1 }
+    },
+    {
+      $group: {
+        _id: {
+          year:  { $year: "$timestamp" },
+          month: { $month: "$timestamp" },
+          day:   { $dayOfMonth: "$timestamp" },
+        },
+
+        firstEnergy:  { $first: "$totalEnergyKwh" },
+        lastEnergy:   { $last:  "$totalEnergyKwh" },
+
+        firstCost:    { $first: "$costDen" },
+        lastCost:     { $last:  "$costDen" },
+
+        firstLight:   { $first: "$runtimeLightMin" },
+        lastLight:    { $last:  "$runtimeLightMin" },
+
+        firstTV:      { $first: "$runtimeTvMin" },
+        lastTV:       { $last:  "$runtimeTvMin" },
+
+        firstFridge:  { $first: "$runtimeFridgeMin" },
+        lastFridge:   { $last:  "$runtimeFridgeMin" },
+      }
+    },
+    {
+      $sort: {
+        "_id.year": 1,
+        "_id.month": 1,
+        "_id.day": 1
+      }
+    }
+  ]);
+
+  if (!days.length) return null;
+
+  let totalKwh = 0;
+  let totalCost = 0;
+  let lightMin = 0;
+  let tvMin = 0;
+  let fridgeMin = 0;
+
+  for (const d of days) {
+    totalKwh += Math.max(0, d.lastEnergy - d.firstEnergy);
+    totalCost += Math.max(0, d.lastCost - d.firstCost);
+
+    lightMin += Math.max(0, d.lastLight - d.firstLight);
+    tvMin += Math.max(0, d.lastTV - d.firstTV);
+    fridgeMin += Math.max(0, d.lastFridge - d.firstFridge);
+  }
+
   return {
-    totalKwh:    Number((last.totalEnergyKwh  - first.totalEnergyKwh).toFixed(3)),
-    totalCost:   Number((last.costDen          - first.costDen).toFixed(2)),
-    lightHours:  Number(((last.runtimeLightMin  - first.runtimeLightMin)  / 60).toFixed(1)),
-    tvHours:     Number(((last.runtimeTvMin     - first.runtimeTvMin)     / 60).toFixed(1)),
-    fridgeHours: Number(((last.runtimeFridgeMin - first.runtimeFridgeMin) / 60).toFixed(1)),
+    totalKwh: Number(totalKwh.toFixed(3)),
+    totalCost: Number(totalCost.toFixed(2)),
+
+    lightHours: Number((lightMin / 60).toFixed(1)),
+    tvHours: Number((tvMin / 60).toFixed(1)),
+    fridgeHours: Number((fridgeMin / 60).toFixed(1)),
   };
 }
 
