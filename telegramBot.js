@@ -45,10 +45,20 @@ function telegramRequest(method, body) {
     const req = https.request(options, (res) => {
       let data = "";
       res.on("data", (chunk) => data += chunk);
-      res.on("end",  () => {
-        try { resolve(JSON.parse(data)); }
-        catch { resolve({}); }
-      });
+      res.on("end", () => {
+        try {
+            const parsed = JSON.parse(data);
+            console.log("[Gemini] Response:", JSON.stringify(parsed).substring(0, 200));
+            const text =
+            parsed.candidates?.[0]?.content?.parts?.[0]?.text ||
+            "Could not generate AI tips.";
+            resolve(text);
+        } catch {
+            console.log("[Gemini] Raw response:", data.substring(0, 200));
+            resolve("Could not parse Gemini response.");
+        }
+    });
+
     });
     req.on("error", reject);
     req.write(json);
@@ -195,7 +205,7 @@ ${week ? `${week.totalKwh} kWh and ${week.totalCost} den` : "Unavailable"}
 
     const options = {
       hostname: "generativelanguage.googleapis.com",
-      path: `/v1beta/models/gemini-2.0-flash:generateContent?key=${AI_KEY}`,
+      path: `/v1beta/models/gemini-1.5-flash:generateContent?key=${AI_KEY}`,
       method: "POST",
       headers: {
         "Content-Type": "application/json",
