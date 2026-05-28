@@ -142,7 +142,7 @@ function localTime() {
 
 async function getAITips(latest, yesterday, week) {
   if (!AI_KEY) {
-    return "AI tips unavailable — GEMINI_API_KEY not set in environment.";
+    return "⚠️ AI tips unavailable — GEMINI_API_KEY not set in environment.";
   }
 
   const prompt = `
@@ -157,7 +157,7 @@ Current data:
 - TV runtime: ${latest.runtimeTvMin} min
 - Light runtime: ${latest.runtimeLightMin} min
 - Fridge runtime: ${latest.runtimeFridgeMin} min
-- Virtual time: ${pad(latest.virtualHour)}:${pad(latest.virtualMin)}
+- Time: ${pad(latest.virtualHour)}:${pad(latest.virtualMin)}
 ${yesterday ? `- Yesterday TV runtime: ${yesterday.runtimeTvMin} min` : ""}
 ${week ? `- 7-day totals: ${week.totalKwh} kWh, ${week.totalCost} den, TV=${week.tvHours}h, Light=${week.lightHours}h` : ""}
 `;
@@ -169,7 +169,7 @@ ${week ? `- 7-day totals: ${week.totalKwh} kWh, ${week.totalCost} den, TV=${week
   return new Promise((resolve) => {
     const options = {
       hostname: "generativelanguage.googleapis.com",
-      path: `/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${AI_KEY}`,
+      path:     `/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${AI_KEY}`,
       method:   "POST",
       headers:  {
         "Content-Type":   "application/json",
@@ -185,6 +185,22 @@ ${week ? `- 7-day totals: ${week.totalKwh} kWh, ${week.totalCost} den, TV=${week
           const parsed = JSON.parse(data);
           console.log("[Gemini] Status:", res.statusCode);
           console.log("[Gemini] Response:", JSON.stringify(parsed).substring(0, 300));
+
+          if (res.statusCode === 429) {
+            resolve("⏳ AI tips temporarily unavailable — rate limit reached. Please try again in 1 minute.");
+            return;
+          }
+
+          if (res.statusCode === 404) {
+            resolve("⚠️ AI model not found. Check Gemini API key and model name.");
+            return;
+          }
+
+          if (res.statusCode !== 200) {
+            resolve(`⚠️ AI service error (${res.statusCode}). Please try again later.`);
+            return;
+          }
+
           const text =
             parsed.candidates?.[0]?.content?.parts?.[0]?.text ||
             "Could not generate AI tips.";
@@ -231,8 +247,8 @@ const MAIN_MENU = [
 const BACK_BUTTON = [[{ text: "⬅️ Back to Menu", callback_data: "menu" }]];
 
 const REFRESH_BACK = [
-  [{ text: "🔄 Refresh Tips",    callback_data: "ai_tips" }],
-  [{ text: "⬅️ Back to Menu",   callback_data: "menu"    }],
+  [{ text: "🔄 Refresh Tips",  callback_data: "ai_tips" }],
+  [{ text: "⬅️ Back to Menu", callback_data: "menu"    }],
 ];
 
 // ============================================================
@@ -392,41 +408,52 @@ What would you like to check?`,
 
 // ============================================================
 //  UPDATE DISPATCHER
+//  - Text messages (e.g. /start /menu) → always sendMessage
+//    (creates a fresh message, no editing)
+//  - Button taps (callback_query) → always editMessage
+//    (updates the existing message in place, no double messages)
 // ============================================================
 
 async function handleUpdate(update) {
+  // Text message — send a fresh menu, never edit
   if (update.message) {
     const chatId = update.message.chat.id;
     const [msg, kb] = buildMainMenu();
     await sendMessage(chatId, msg, kb);
+    return;  // ← important: stop here, don't fall through
   }
 
+  // Button tap — edit the existing message in place
   if (update.callback_query) {
     const query  = update.callback_query;
     const chatId = query.message.chat.id;
     const msgId  = query.message.message_id;
     const action = query.data;
 
+    // Acknowledge the tap immediately (removes spinner)
     await answerCallback(query.id);
 
+    // Special case: dashboard just shows the link
+    if (action === "dashboard") {
+      await editMessage(
+        chatId, msgId,
+        `🔗 <b>Dashboard Link</b>\n\n<a href="${DASHBOARD}">${DASHBOARD}</a>`,
+        BACK_BUTTON
+      );
+      return;
+    }
+
+    // All other actions build a response and edit in place
     let result;
     switch (action) {
-      case "menu":      result = buildMainMenu();   break;
-      case "summary":   result = buildSummary();    break;
-      case "devices":   result = buildDevices();    break;
-      case "energy":    result = buildEnergy();     break;
-      case "cost":      result = buildCost();       break;
-      case "ai_tips":   result = buildAITips();     break;
-      case "week":      result = buildWeekReport(); break;
-      case "dashboard":
-        await editMessage(
-          chatId, msgId,
-          `🔗 <b>Dashboard Link</b>\n\n<a href="${DASHBOARD}">${DASHBOARD}</a>`,
-          BACK_BUTTON
-        );
-        return;
-      default:
-        result = buildMainMenu();
+      case "menu":    result = buildMainMenu();   break;
+      case "summary": result = buildSummary();    break;
+      case "devices": result = buildDevices();    break;
+      case "energy":  result = buildEnergy();     break;
+      case "cost":    result = buildCost();       break;
+      case "ai_tips": result = buildAITips();     break;
+      case "week":    result = buildWeekReport(); break;
+      default:        result = buildMainMenu();
     }
 
     const [msg, kb] = await result;
