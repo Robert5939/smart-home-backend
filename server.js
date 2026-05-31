@@ -173,6 +173,17 @@ app.get("/api/readings/daily", async (req, res) => {
   }
 });
 
+// ── GET single latest reading (for ESP32 boot sync) ───────
+app.get("/api/readings/last", async (req, res) => {
+  try {
+    const reading = await Reading.findOne().sort({ timestamp: -1 });
+    if (!reading) return res.json({ success: false, message: "No readings found" });
+    res.json({ success: true, data: reading });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
 // ── GET today's hourly breakdown ──────────────────────────
 app.get("/api/readings/today", async (req, res) => {
   try {
@@ -195,31 +206,6 @@ app.get("/api/readings/today", async (req, res) => {
       },
       { $sort: { _id: 1 } },
     ]);
-
-    // ── GET latest reading only ──────────────────────────
-app.get("/api/readings/latest", async (req, res) => {
-  try {
-    const latest = await Reading.findOne().sort({ timestamp: -1 });
-
-    if (!latest) {
-      return res.json({
-        success: true,
-        data: null
-      });
-    }
-
-    res.json({
-      success: true,
-      data: latest
-    });
-
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
-  }
-});
 
     const result = hourly.map((h) => ({
       hour:     `${String(h._id).padStart(2, "0")}:00`,
