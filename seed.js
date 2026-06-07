@@ -1,162 +1,112 @@
 /**
- * ============================================================
- *  Smart Home EMS — Database Seed Script
- *  Generates 60 days of data ending on June 6, 2026
- *  Run: node seed.js
- * ============================================================
+ * Smart Home EMS — Seed Script
+ * Generates 60 days ending June 6, 2026
+ * ONLY deletes readings with fastMode:false AND timestamp before June 7
+ * Preserves real ESP32 readings
  */
-
 require("dotenv").config();
 const mongoose = require("mongoose");
 const Reading  = require("./models/Reading");
 
-// ── Config ────────────────────────────────────────────────
-const END_DATE   = new Date("2026-06-06T23:59:00Z");
-const DAYS       = 60;
+const END_DATE     = new Date("2026-06-06T23:30:00.000Z");
+const DAYS         = 60;
 const INTERVAL_MIN = 30;
-
 const POWER_LIGHT  = 15;
 const POWER_TV     = 120;
 const POWER_FRIDGE = 180;
-
-const TARIFF_CHEAP     = 5;
-const TARIFF_EXPENSIVE = 10;
-
-// ── Helpers ───────────────────────────────────────────────
+const TARIFF_CHEAP = 5, TARIFF_EXP = 10;
 
 function chance(p) { return Math.random() < p; }
+function jitter(v, p=0.08) { return v * (1 + (Math.random()*2-1)*p); }
 
-function jitter(val, pct = 0.10) {
-  return val * (1 + (Math.random() * 2 - 1) * pct);
+function isCheap(h, dow) {
+  return dow===0 || (h>=13&&h<15) || h>=22 || h<7;
 }
 
-function isCheap(hour, dayOfWeek) {
-  return dayOfWeek === 0 ||
-    (hour >= 13 && hour < 15) ||
-    hour >= 22 ||
-    hour < 7;
+function deviceStates(h, dow, fail) {
+  const wk = dow===0||dow===6;
+  let lp=0, tp=0;
+  if      (h>=6&&h<9)  lp=0.8;
+  else if (h>=9&&h<17) lp=wk?0.4:0.15;
+  else if (h>=17&&h<23)lp=0.95;
+  else                 lp=0.05;
+  if      (h>=7&&h<10) tp=wk?0.5:0.2;
+  else if (h>=10&&h<17)tp=wk?0.5:0.1;
+  else if (h>=17&&h<23)tp=0.9;
+  else                 tp=0.03;
+  return { lightOn:chance(lp), tvOn:chance(tp), fridgeOn:!fail };
 }
-
-function deviceStates(hour, dayOfWeek, fridgeFailing) {
-  const weekend = dayOfWeek === 0 || dayOfWeek === 6;
-  let lightProb = 0, tvProb = 0;
-
-  if      (hour >= 6  && hour < 9)  lightProb = 0.8;
-  else if (hour >= 9  && hour < 17) lightProb = weekend ? 0.4 : 0.15;
-  else if (hour >= 17 && hour < 23) lightProb = 0.95;
-  else                              lightProb = 0.05;
-
-  if      (hour >= 7  && hour < 10) tvProb = weekend ? 0.5 : 0.2;
-  else if (hour >= 10 && hour < 17) tvProb = weekend ? 0.5 : 0.1;
-  else if (hour >= 17 && hour < 23) tvProb = 0.9;
-  else                              tvProb = 0.03;
-
-  return {
-    lightOn:  chance(lightProb),
-    tvOn:     chance(tvProb),
-    fridgeOn: !fridgeFailing,
-  };
-}
-
-// ── Main ──────────────────────────────────────────────────
 
 async function seed() {
   await mongoose.connect(process.env.MONGODB_URI);
   console.log("MongoDB Connected");
 
-  // Only delete seeded data (fastMode: false), preserve real ESP32 data
-  const deleted = await Reading.deleteMany({ fastMode: false });
+  // Only delete old seeded data (before June 7) — preserve real ESP32 data
+  const cutoff = new Date("2026-06-07T00:00:00.000Z");
+  const deleted = await Reading.deleteMany({
+    fastMode: false,
+    timestamp: { $lt: cutoff }
+  });
   console.log(`Deleted ${deleted.deletedCount} old seeded records`);
 
-  const readings  = [];
-  const totalReadings = DAYS * (1440 / INTERVAL_MIN);
-
-  // Work backwards from END_DATE
   const startDate = new Date(END_DATE);
   startDate.setDate(startDate.getDate() - DAYS);
   startDate.setHours(0, 0, 0, 0);
 
-  let energyLight  = 0;
-  let energyTV     = 0;
-  let energyFridge = 0;
-  let totalCost    = 0;
-  let runtimeLight = 0;
-  let runtimeTV    = 0;
-  let runtimeFridge= 0;
+  const totalReadings = DAYS * (1440 / INTERVAL_MIN);
+  const readings = [];
 
-  // Scatter fridge failures across the period
-  const fridgeFailures = new Set([100, 250, 580, 900, 1300, 1800, 2200]);
+  let eL=0, eT=0, eF=0, cost=0, rL=0, rT=0, rF=0;
+  const fails = new Set([80,200,450,700,1100,1600,2100]);
 
   for (let i = 0; i < totalReadings; i++) {
-    const timestamp  = new Date(startDate.getTime() + i * INTERVAL_MIN * 60000);
-    const hour       = timestamp.getUTCHours();
-    const dayOfWeek  = timestamp.getUTCDay();
-
-    const fridgeFailing = fridgeFailures.has(i);
-    const { lightOn, tvOn, fridgeOn } = deviceStates(hour, dayOfWeek, fridgeFailing);
-
-    const hours  = INTERVAL_MIN / 60;
-    const cheap  = isCheap(hour, dayOfWeek);
-    const tariff = cheap ? TARIFF_CHEAP : TARIFF_EXPENSIVE;
-
-    const dLight  = lightOn  ? jitter((POWER_LIGHT  * hours) / 1000) : 0;
-    const dTV     = tvOn     ? jitter((POWER_TV     * hours) / 1000) : 0;
-    const dFridge = fridgeOn ? jitter((POWER_FRIDGE * hours) / 1000) : 0;
-
-    energyLight  += dLight;
-    energyTV     += dTV;
-    energyFridge += dFridge;
-    totalCost    += (dLight + dTV + dFridge) * tariff;
-
-    if (lightOn)  runtimeLight  += INTERVAL_MIN;
-    if (tvOn)     runtimeTV     += INTERVAL_MIN;
-    if (fridgeOn) runtimeFridge += INTERVAL_MIN;
-
-    const totalEnergy = energyLight + energyTV + energyFridge;
+    const ts  = new Date(startDate.getTime() + i * INTERVAL_MIN * 60000);
+    const h   = ts.getUTCHours();
+    const dow = ts.getUTCDay();
+    const fail= fails.has(i);
+    const { lightOn, tvOn, fridgeOn } = deviceStates(h, dow, fail);
+    const hrs    = INTERVAL_MIN / 60;
+    const cheap  = isCheap(h, dow);
+    const tariff = cheap ? TARIFF_CHEAP : TARIFF_EXP;
+    const dL = lightOn  ? jitter((POWER_LIGHT  * hrs)/1000) : 0;
+    const dT = tvOn     ? jitter((POWER_TV     * hrs)/1000) : 0;
+    const dF = fridgeOn ? jitter((POWER_FRIDGE * hrs)/1000) : 0;
+    eL += dL; eT += dT; eF += dF;
+    cost += (dL+dT+dF) * tariff;
+    if (lightOn)  rL += INTERVAL_MIN;
+    if (tvOn)     rT += INTERVAL_MIN;
+    if (fridgeOn) rF += INTERVAL_MIN;
 
     readings.push({
-      timestamp,
-      lightOn,
-      tvOn,
-      fridgeOn,
-      energyLightKwh:  Number(energyLight.toFixed(4)),
-      energyTvKwh:     Number(energyTV.toFixed(4)),
-      energyFridgeKwh: Number(energyFridge.toFixed(4)),
-      totalEnergyKwh:  Number(totalEnergy.toFixed(4)),
-      costDen:         Number(totalCost.toFixed(2)),
+      timestamp: ts,
+      lightOn, tvOn, fridgeOn,
+      energyLightKwh:  Number(eL.toFixed(4)),
+      energyTvKwh:     Number(eT.toFixed(4)),
+      energyFridgeKwh: Number(eF.toFixed(4)),
+      totalEnergyKwh:  Number((eL+eT+eF).toFixed(4)),
+      costDen:         Number(cost.toFixed(2)),
       tariff,
-      runtimeLightMin:  Math.round(runtimeLight),
-      runtimeTvMin:     Math.round(runtimeTV),
-      runtimeFridgeMin: Math.round(runtimeFridge),
-      virtualHour:  hour,
-      virtualMin:   timestamp.getUTCMinutes(),
-      fastMode:     false,
+      runtimeLightMin:  Math.round(rL),
+      runtimeTvMin:     Math.round(rT),
+      runtimeFridgeMin: Math.round(rF),
+      virtualHour: h,
+      virtualMin:  ts.getUTCMinutes(),
+      fastMode: false,
       wifiConnected: true,
-      motionDetected: lightOn || tvOn,
+      motionDetected: lightOn||tvOn,
     });
   }
 
-  // Insert in batches of 500 to avoid memory issues
-  const BATCH = 500;
-  for (let i = 0; i < readings.length; i += BATCH) {
-    await Reading.insertMany(readings.slice(i, i + BATCH));
-    console.log(`Inserted ${Math.min(i + BATCH, readings.length)}/${readings.length}`);
+  for (let i = 0; i < readings.length; i += 500) {
+    await Reading.insertMany(readings.slice(i, i+500));
+    process.stdout.write(`\rInserted ${Math.min(i+500, readings.length)}/${readings.length}`);
   }
 
-  const last = readings[readings.length - 1];
-  console.log("\n==========================");
-  console.log("FINAL TOTALS");
-  console.log("==========================");
-  console.log("Energy:", last.totalEnergyKwh.toFixed(2), "kWh");
-  console.log("Cost:  ", last.costDen.toFixed(2), "den");
+  const last = readings[readings.length-1];
+  console.log("\n\nFINAL: " + last.totalEnergyKwh + " kWh, " + last.costDen + " den");
   console.log("Period: " + startDate.toDateString() + " → " + END_DATE.toDateString());
-  console.log("==========================\n");
-
   await mongoose.disconnect();
-  console.log("Seed complete.");
+  console.log("Done.");
 }
 
-seed().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+seed().catch(e => { console.error(e); process.exit(1); });
