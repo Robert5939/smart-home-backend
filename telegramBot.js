@@ -161,7 +161,7 @@ const Command = require("./models/command");
 
 const TOKEN     = process.env.TELEGRAM_BOT_TOKEN;
 const CHAT_ID   = process.env.TELEGRAM_CHAT_ID;
-const DASHBOARD = process.env.DASHBOARD_URL || "https://your-dashboard.netlify.app";
+const DASHBOARD = process.env.DASHBOARD_URL || "https://smart-home-energy-system.netlify.app/";
 const AI_KEY    = process.env.GROQ_API_KEY;
 
 let lastUpdateId = 0;
