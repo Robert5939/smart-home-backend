@@ -15,10 +15,7 @@ app.use(express.json());
 
 mongoose
   .connect(process.env.MONGODB_URI)
-  .then(() => {
-    console.log("MongoDB Connected");
-    tg.alertSystemStartup();
-  })
+  .then(() => { console.log("MongoDB Connected"); tg.alertSystemStartup(); })
   .catch((err) => console.error("MongoDB Error:", err));
 
 // ── State tracking ────────────────────────────────────────
@@ -30,11 +27,9 @@ let lastFridgeFailAlert  = 0;
 const TARIFF_COOLDOWN_MS      = 60 * 60 * 1000;
 const FRIDGE_FAIL_COOLDOWN_MS = 30 * 1000;
 
-// FIX: Track when a remote command was last issued per device.
-// This creates a grace period so that a state change caused by
-// our own Telegram command does NOT trigger a spurious alert.
-let commandInFlight = {};           // e.g. { light: 1718000000000, tv: ... }
-const COMMAND_GRACE_MS = 10000;     // 10 s grace window after sending a command
+// Track previous reading's cumulative values to compute interval delta
+let prevCumulativeEnergy = null;
+let prevCumulativeCost   = null;
 
 // ── Health check ──────────────────────────────────────────
 app.get("/", (req, res) => {
@@ -44,51 +39,62 @@ app.get("/", (req, res) => {
 // ── POST reading (from ESP32) ─────────────────────────────
 app.post("/api/readings", async (req, res) => {
   try {
-    const reading = await Reading.create(req.body);
-    const d = req.body, now = Date.now();
+    const d = req.body;
 
-    // Fridge failure
+    // Compute interval delta on the server — this is reboot-safe
+    // because we track previous cumulative value server-side
+    let intervalEnergy = 0;
+    let intervalCost   = 0;
+
+    if (prevCumulativeEnergy !== null && d.totalEnergyKwh >= prevCumulativeEnergy) {
+      // Normal case: energy increased since last reading
+      intervalEnergy = d.totalEnergyKwh - prevCumulativeEnergy;
+      intervalCost   = d.costDen        - prevCumulativeCost;
+    } else if (prevCumulativeEnergy !== null && d.totalEnergyKwh < prevCumulativeEnergy) {
+      // Reboot detected: ESP32 reset to 0 or lower value
+      // Use the raw reading as the interval (energy added since boot)
+      intervalEnergy = d.totalEnergyKwh;
+      intervalCost   = d.costDen;
+      console.log("[Server] Reboot detected — using raw values as interval delta");
+    }
+
+    // Clamp negatives (shouldn't happen but just in case)
+    intervalEnergy = Math.max(0, intervalEnergy);
+    intervalCost   = Math.max(0, intervalCost);
+
+    // Update tracking
+    prevCumulativeEnergy = d.totalEnergyKwh;
+    prevCumulativeCost   = d.costDen;
+
+    // Save reading with interval values
+    const reading = await Reading.create({
+      ...d,
+      intervalEnergyKwh: Number(intervalEnergy.toFixed(6)),
+      intervalCostDen:   Number(intervalCost.toFixed(4)),
+    });
+
+    const now = Date.now();
+
+    // Telegram alerts
     if (d.fridgeOn === false && (now - lastFridgeFailAlert) > FRIDGE_FAIL_COOLDOWN_MS) {
-      lastFridgeFailAlert = now;
-      tg.alertFridgeFailure();
+      lastFridgeFailAlert = now; tg.alertFridgeFailure();
     }
-    // Fridge recovered
     if (prevState.fridgeOn === false && d.fridgeOn === true) tg.alertFridgeRecovered();
-
-    // TV warning (still watching?)
     if (d.tvWarning === true) tg.alertTVWarning();
-
-    // TV turned off — FIX: skip alert if we just sent a remote command
     if (prevState.tvOn === true && d.tvOn === false) {
-      const gracePeriod = commandInFlight.tv &&
-                          (now - commandInFlight.tv) < COMMAND_GRACE_MS;
-      if (!gracePeriod) {
-        d.autoOff ? tg.alertTVAutoOff() : tg.alertTVManualOff();
-      }
+      d.autoOff ? tg.alertTVAutoOff() : tg.alertTVManualOff();
     }
-
-    // Light turned off — FIX: skip alert if we just sent a remote command
     if (prevState.lightOn === true && d.lightOn === false) {
-      const gracePeriod = commandInFlight.light &&
-                          (now - commandInFlight.light) < COMMAND_GRACE_MS;
-      if (!gracePeriod) {
-        d.autoOff ? tg.alertLightAutoOff() : tg.alertLightManualOff();
-      }
+      d.autoOff ? tg.alertLightAutoOff() : tg.alertLightManualOff();
     }
-
-    // Tariff change
     if (prevState.tariff !== null && prevState.tariff !== d.tariff &&
         (now - lastTariffAlert) > TARIFF_COOLDOWN_MS) {
-      lastTariffAlert = now;
-      tg.alertTariffChange(d.tariff);
+      lastTariffAlert = now; tg.alertTariffChange(d.tariff);
     }
-
-    // Daily summary at real hour 8
     if (d.virtualHour === 8) {
       const today = new Date().toDateString();
       if (lastDailySummaryDate !== today) {
-        lastDailySummaryDate = today;
-        tg.alertDailySummary(d);
+        lastDailySummaryDate = today; tg.alertDailySummary(d);
       }
     }
 
@@ -121,7 +127,7 @@ app.get("/api/readings/last", async (req, res) => {
   }
 });
 
-// ── GET daily aggregates ──────────────────────────────────
+// ── GET daily aggregates — uses intervalEnergyKwh (reboot-safe) ──
 app.get("/api/readings/daily", async (req, res) => {
   try {
     const days = await Reading.aggregate([
@@ -132,10 +138,9 @@ app.get("/api/readings/daily", async (req, res) => {
             month: { $month: "$timestamp" },
             day:   { $dayOfMonth: "$timestamp" },
           },
-          minEnergy: { $min: "$totalEnergyKwh" },
-          maxEnergy: { $max: "$totalEnergyKwh" },
-          minCost:   { $min: "$costDen" },
-          maxCost:   { $max: "$costDen" },
+          // SUM of interval values = total energy for that day regardless of reboots
+          dailyKwh:    { $sum: "$intervalEnergyKwh" },
+          dailyCost:   { $sum: "$intervalCostDen"   },
           avgDevicesOn: {
             $avg: {
               $add: [
@@ -153,25 +158,16 @@ app.get("/api/readings/daily", async (req, res) => {
       { $sort: { "_id.year": 1, "_id.month": 1, "_id.day": 1 } },
     ]);
 
-    // Daily delta = max - min within that day.
-    // Reboot-safe: even if ESP32 reboots and resets to 0,
-    // max value achieved that day minus starting min is still correct.
-    const result = days.map((d) => {
-      const dailyKwh  = Math.max(0, d.maxEnergy - d.minEnergy);
-      const dailyCost = Math.max(0, d.maxCost   - d.minCost);
-      const label = new Date(d.dateRef).toLocaleDateString("en-GB", {
-        day: "2-digit", month: "short",
-        timeZone: "Europe/Skopje",
-      });
-      return {
-        label,
-        dailyKwh:     Number(dailyKwh.toFixed(3)),
-        dailyCost:    Number(dailyCost.toFixed(2)),
-        avgDevicesOn: Number(d.avgDevicesOn.toFixed(2)),
-        avgTariff:    Number(d.avgTariff.toFixed(1)),
-        readings:     d.readings,
-      };
-    });
+    const result = days.map((d) => ({
+      label:        new Date(d.dateRef).toLocaleDateString("en-GB", {
+                      day: "2-digit", month: "short", timeZone: "Europe/Skopje"
+                    }),
+      dailyKwh:     Number(Math.max(0, d.dailyKwh).toFixed(3)),
+      dailyCost:    Number(Math.max(0, d.dailyCost).toFixed(2)),
+      avgDevicesOn: Number(d.avgDevicesOn.toFixed(2)),
+      avgTariff:    Number(d.avgTariff.toFixed(1)),
+      readings:     d.readings,
+    }));
 
     res.json({ success: true, count: result.length, data: result });
   } catch (error) {
@@ -191,10 +187,8 @@ app.get("/api/readings/today", async (req, res) => {
       {
         $group: {
           _id:          { $hour: "$timestamp" },
-          firstEnergy:  { $first: "$totalEnergyKwh" },
-          lastEnergy:   { $last:  "$totalEnergyKwh"  },
-          firstCost:    { $first: "$costDen" },
-          lastCost:     { $last:  "$costDen"  },
+          kwh:          { $sum: "$intervalEnergyKwh" },
+          cost:         { $sum: "$intervalCostDen"   },
           lightOnCount: { $sum: { $cond: ["$lightOn", 1, 0] } },
           tvOnCount:    { $sum: { $cond: ["$tvOn",    1, 0] } },
           total:        { $sum: 1 },
@@ -205,8 +199,8 @@ app.get("/api/readings/today", async (req, res) => {
 
     const result = hourly.map((h) => ({
       hour:     `${String(h._id).padStart(2, "0")}:00`,
-      kwh:      Number(Math.max(0, h.lastEnergy - h.firstEnergy).toFixed(4)),
-      cost:     Number(Math.max(0, h.lastCost   - h.firstCost).toFixed(3)),
+      kwh:      Number(Math.max(0, h.kwh).toFixed(4)),
+      cost:     Number(Math.max(0, h.cost).toFixed(3)),
       lightPct: h.total > 0 ? Math.round((h.lightOnCount / h.total) * 100) : 0,
       tvPct:    h.total > 0 ? Math.round((h.tvOnCount    / h.total) * 100) : 0,
     }));
@@ -217,19 +211,12 @@ app.get("/api/readings/today", async (req, res) => {
   }
 });
 
-// ── POST command (from Telegram bot → ESP32) ──────────────
+// ── POST command (Telegram → ESP32) ──────────────────────
 app.post("/api/commands", async (req, res) => {
   try {
     const { device, action } = req.body;
-    if (!device || !action) {
+    if (!device || !action)
       return res.status(400).json({ success: false, message: "device and action required" });
-    }
-
-    // FIX: Record when this command was issued so the incoming reading
-    // handler can ignore spurious state-change alerts during the grace period
-    commandInFlight[device] = Date.now();
-
-    // Delete any pending command for same device first
     await Command.deleteMany({ device, executed: false });
     const command = await Command.create({ device, action });
     console.log(`[Command] ${device} → ${action}`);
@@ -245,7 +232,7 @@ app.get("/api/commands/pending", async (req, res) => {
     const commands = await Command.find({ executed: false });
     if (commands.length > 0) {
       await Command.updateMany({ executed: false }, { executed: true });
-      console.log(`[Command] Delivered ${commands.length} command(s) to ESP32`);
+      console.log(`[Command] Delivered ${commands.length} command(s)`);
     }
     res.json({ success: true, data: commands });
   } catch (error) {
@@ -260,7 +247,7 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, async () => {
   console.log(`Server running on port ${PORT}`);
 
-  // Keepalive ping every 14 min
+  // Keepalive ping every 14 min (prevents Render free tier sleep)
   const SELF_URL = process.env.RENDER_EXTERNAL_URL;
   if (SELF_URL) {
     setInterval(() => {
@@ -274,9 +261,7 @@ app.listen(PORT, async () => {
 
   // Telegram webhook
   const { handleUpdate, setupWebhook } = require("./telegramBot");
-  if (SELF_URL) {
-    await setupWebhook(SELF_URL);
-  }
+  if (SELF_URL) await setupWebhook(SELF_URL);
 
   app.post("/telegram-webhook", express.json(), async (req, res) => {
     res.sendStatus(200);
