@@ -30,6 +30,12 @@ let lastFridgeFailAlert  = 0;
 const TARIFF_COOLDOWN_MS      = 60 * 60 * 1000;
 const FRIDGE_FAIL_COOLDOWN_MS = 30 * 1000;
 
+// FIX: Track when a remote command was last issued per device.
+// This creates a grace period so that a state change caused by
+// our own Telegram command does NOT trigger a spurious alert.
+let commandInFlight = {};           // e.g. { light: 1718000000000, tv: ... }
+const COMMAND_GRACE_MS = 10000;     // 10 s grace window after sending a command
+
 // ── Health check ──────────────────────────────────────────
 app.get("/", (req, res) => {
   res.json({ status: "running", database: "connected" });
@@ -52,14 +58,22 @@ app.post("/api/readings", async (req, res) => {
     // TV warning (still watching?)
     if (d.tvWarning === true) tg.alertTVWarning();
 
-    // TV turned off
+    // TV turned off — FIX: skip alert if we just sent a remote command
     if (prevState.tvOn === true && d.tvOn === false) {
-      d.autoOff ? tg.alertTVAutoOff() : tg.alertTVManualOff();
+      const gracePeriod = commandInFlight.tv &&
+                          (now - commandInFlight.tv) < COMMAND_GRACE_MS;
+      if (!gracePeriod) {
+        d.autoOff ? tg.alertTVAutoOff() : tg.alertTVManualOff();
+      }
     }
 
-    // Light turned off
+    // Light turned off — FIX: skip alert if we just sent a remote command
     if (prevState.lightOn === true && d.lightOn === false) {
-      d.autoOff ? tg.alertLightAutoOff() : tg.alertLightManualOff();
+      const gracePeriod = commandInFlight.light &&
+                          (now - commandInFlight.light) < COMMAND_GRACE_MS;
+      if (!gracePeriod) {
+        d.autoOff ? tg.alertLightAutoOff() : tg.alertLightManualOff();
+      }
     }
 
     // Tariff change
@@ -118,7 +132,6 @@ app.get("/api/readings/daily", async (req, res) => {
             month: { $month: "$timestamp" },
             day:   { $dayOfMonth: "$timestamp" },
           },
-          // Use $min/$max to get true first/last by value not insertion order
           minEnergy: { $min: "$totalEnergyKwh" },
           maxEnergy: { $max: "$totalEnergyKwh" },
           minCost:   { $min: "$costDen" },
@@ -140,9 +153,9 @@ app.get("/api/readings/daily", async (req, res) => {
       { $sort: { "_id.year": 1, "_id.month": 1, "_id.day": 1 } },
     ]);
 
-    // Daily delta = max - min within that day
-    // This is reboot-safe: even if ESP32 reboots and resets to 0,
-    // we use the max value achieved that day minus the starting min
+    // Daily delta = max - min within that day.
+    // Reboot-safe: even if ESP32 reboots and resets to 0,
+    // max value achieved that day minus starting min is still correct.
     const result = days.map((d) => {
       const dailyKwh  = Math.max(0, d.maxEnergy - d.minEnergy);
       const dailyCost = Math.max(0, d.maxCost   - d.minCost);
@@ -211,6 +224,11 @@ app.post("/api/commands", async (req, res) => {
     if (!device || !action) {
       return res.status(400).json({ success: false, message: "device and action required" });
     }
+
+    // FIX: Record when this command was issued so the incoming reading
+    // handler can ignore spurious state-change alerts during the grace period
+    commandInFlight[device] = Date.now();
+
     // Delete any pending command for same device first
     await Command.deleteMany({ device, executed: false });
     const command = await Command.create({ device, action });
@@ -225,7 +243,6 @@ app.post("/api/commands", async (req, res) => {
 app.get("/api/commands/pending", async (req, res) => {
   try {
     const commands = await Command.find({ executed: false });
-    // Mark as executed
     if (commands.length > 0) {
       await Command.updateMany({ executed: false }, { executed: true });
       console.log(`[Command] Delivered ${commands.length} command(s) to ESP32`);
