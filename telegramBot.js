@@ -157,7 +157,7 @@ async function getLast7DaysStats() {
 
 const https   = require("https");
 const Reading = require("./models/Reading");
-const Command = require("./models/Command");
+const Command = require("./models/command");
 
 const TOKEN     = process.env.TELEGRAM_BOT_TOKEN;
 const CHAT_ID   = process.env.TELEGRAM_CHAT_ID;

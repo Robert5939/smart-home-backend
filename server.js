@@ -3,7 +3,7 @@ require("dotenv").config();
 const http    = require("http");
 const https   = require("https");
 const Reading = require("./models/Reading");
-const Command = require("./models/Command");
+const Command = require("./models/command");
 const express = require("express");
 const mongoose= require("mongoose");
 const cors    = require("cors");
